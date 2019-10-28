@@ -114,7 +114,7 @@ void RasterizerStorageGLES2::bind_quad_array() const {
 	glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
 }
 
-Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_image, Image::Format p_format, uint32_t p_flags, Image::Format &r_real_format, GLenum &r_gl_format, GLenum &r_gl_internal_format, GLenum &r_gl_type, bool &r_compressed, bool p_will_need_resize) const {
+Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_image, Image::Format p_format, uint32_t p_flags, Image::Format &r_real_format, GLenum &r_gl_format, GLenum &r_gl_internal_format, GLenum &r_gl_type, bool &r_compressed, bool p_force_decompress) const {
 
 	r_gl_format = 0;
 	Ref<Image> image = p_image;
@@ -261,7 +261,7 @@ Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_
 		} break;
 		case Image::FORMAT_DXT1: {
 
-			if (config.s3tc_supported && !p_will_need_resize) {
+			if (config.s3tc_supported) {
 				r_gl_internal_format = _EXT_COMPRESSED_RGBA_S3TC_DXT1_EXT;
 				r_gl_format = GL_RGBA;
 				r_gl_type = GL_UNSIGNED_BYTE;
@@ -273,7 +273,7 @@ Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_
 		} break;
 		case Image::FORMAT_DXT3: {
 
-			if (config.s3tc_supported && !p_will_need_resize) {
+			if (config.s3tc_supported) {
 				r_gl_internal_format = _EXT_COMPRESSED_RGBA_S3TC_DXT3_EXT;
 				r_gl_format = GL_RGBA;
 				r_gl_type = GL_UNSIGNED_BYTE;
@@ -285,7 +285,7 @@ Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_
 		} break;
 		case Image::FORMAT_DXT5: {
 
-			if (config.s3tc_supported && !p_will_need_resize) {
+			if (config.s3tc_supported) {
 				r_gl_internal_format = _EXT_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 				r_gl_format = GL_RGBA;
 				r_gl_type = GL_UNSIGNED_BYTE;
@@ -424,7 +424,7 @@ Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_
 		} break;
 		case Image::FORMAT_ETC: {
 
-			if (config.etc1_supported && !p_will_need_resize) {
+			if (config.etc1_supported) {
 				r_gl_internal_format = _EXT_ETC1_RGB8_OES;
 				r_gl_format = GL_RGBA;
 				r_gl_type = GL_UNSIGNED_BYTE;
@@ -467,7 +467,7 @@ Ref<Image> RasterizerStorageGLES2::_get_gl_image_and_format(const Ref<Image> &p_
 		}
 	}
 
-	if (need_decompress) {
+	if (need_decompress || p_force_decompress) {
 
 		if (!image.is_null()) {
 
@@ -638,7 +638,7 @@ void RasterizerStorageGLES2::texture_set_data(RID p_texture, const Ref<Image> &p
 
 	if (texture->resize_to_po2) {
 		if (p_image->is_compressed()) {
-			ERR_PRINTS("Texture '" + texture->path + "' was required to be a power of 2 (because it uses either mipmaps or repeat), so it was decompressed. This will hurt performance and memory usage.");
+			ERR_PRINTS("Texture '" + texture->path + "' is required to be a power of 2 because it uses either mipmaps or repeat, so it was decompressed. This will hurt performance and memory usage.");
 		}
 
 		if (img == p_image) {
@@ -659,12 +659,13 @@ void RasterizerStorageGLES2::texture_set_data(RID p_texture, const Ref<Image> &p
 
 			img->resize(texture->alloc_width, texture->alloc_height, Image::INTERPOLATE_BILINEAR);
 		}
-	};
+	}
 
 	GLenum blit_target = (texture->target == GL_TEXTURE_CUBE_MAP) ? _cube_side_enum[p_layer] : GL_TEXTURE_2D;
 
 	texture->data_size = img->get_data().size();
 	PoolVector<uint8_t>::Read read = img->get_data().read();
+	ERR_FAIL_COND(!read.ptr());
 
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(texture->target, texture->tex_id);
@@ -718,7 +719,7 @@ void RasterizerStorageGLES2::texture_set_data(RID p_texture, const Ref<Image> &p
 		int size, ofs;
 		img->get_mipmap_offset_and_size(i, ofs, size);
 
-		if (texture->compressed) {
+		if (compressed) {
 			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 
 			int bw = w;
@@ -3236,12 +3237,14 @@ Color RasterizerStorageGLES2::multimesh_instance_get_custom_data(RID p_multimesh
 void RasterizerStorageGLES2::multimesh_set_as_bulk_array(RID p_multimesh, const PoolVector<float> &p_array) {
 	MultiMesh *multimesh = multimesh_owner.getornull(p_multimesh);
 	ERR_FAIL_COND(!multimesh);
+	ERR_FAIL_COND(!multimesh->data.ptr());
 
 	int dsize = multimesh->data.size();
 
 	ERR_FAIL_COND(dsize != p_array.size());
 
 	PoolVector<float>::Read r = p_array.read();
+	ERR_FAIL_COND(!r.ptr());
 	copymem(multimesh->data.ptrw(), r.ptr(), dsize * sizeof(float));
 
 	multimesh->dirty_data = true;
@@ -4733,12 +4736,13 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 
-		glFramebufferTexture2DMultisample(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->color, 0, msaa);
+		glFramebufferTexture2DMultisample(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt->multisample_color, 0, msaa);
 #endif
 
 		GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 
 		if (status != GL_FRAMEBUFFER_COMPLETE) {
+			WARN_PRINT_ONCE("Cannot allocate back framebuffer for MSAA");
 			printf("err status: %x\n", status);
 			_render_target_clear(rt);
 			ERR_FAIL_COND(status != GL_FRAMEBUFFER_COMPLETE);
@@ -5732,7 +5736,7 @@ void RasterizerStorageGLES2::initialize() {
 	config.float_texture_supported = config.extensions.has("GL_ARB_texture_float") || config.extensions.has("GL_OES_texture_float");
 	config.s3tc_supported = config.extensions.has("GL_EXT_texture_compression_s3tc") || config.extensions.has("WEBGL_compressed_texture_s3tc");
 	config.etc1_supported = config.extensions.has("GL_OES_compressed_ETC1_RGB8_texture") || config.extensions.has("WEBGL_compressed_texture_etc1");
-	config.pvrtc_supported = config.extensions.has("IMG_texture_compression_pvrtc");
+	config.pvrtc_supported = config.extensions.has("IMG_texture_compression_pvrtc") || config.extensions.has("WEBGL_compressed_texture_pvrtc");
 	config.support_npot_repeat_mipmap = config.extensions.has("GL_OES_texture_npot");
 
 #endif
@@ -5771,7 +5775,7 @@ void RasterizerStorageGLES2::initialize() {
 	config.support_depth_cubemaps = true;
 #else
 	config.use_rgba_2d_shadows = !(config.float_texture_supported && config.extensions.has("GL_EXT_texture_rg"));
-	config.support_depth_texture = config.extensions.has("GL_OES_depth_texture");
+	config.support_depth_texture = config.extensions.has("GL_OES_depth_texture") || config.extensions.has("WEBGL_depth_texture");
 	config.use_rgba_3d_shadows = !config.support_depth_texture;
 	config.support_depth_cubemaps = config.extensions.has("GL_OES_depth_texture_cube_map");
 #endif
@@ -5798,7 +5802,7 @@ void RasterizerStorageGLES2::initialize() {
 #endif
 
 	config.rgtc_supported = config.extensions.has("GL_EXT_texture_compression_rgtc") || config.extensions.has("GL_ARB_texture_compression_rgtc") || config.extensions.has("EXT_texture_compression_rgtc");
-	config.bptc_supported = config.extensions.has("GL_ARB_texture_compression_bptc");
+	config.bptc_supported = config.extensions.has("GL_ARB_texture_compression_bptc") || config.extensions.has("EXT_texture_compression_bptc");
 
 	//determine formats for depth textures (or renderbuffers)
 	if (config.support_depth_texture) {

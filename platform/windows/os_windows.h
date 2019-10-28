@@ -81,7 +81,9 @@ class OS_Windows : public OS {
 		KEY_EVENT_BUFFER_SIZE = 512
 	};
 
+#ifdef STDOUT_FILE
 	FILE *stdo;
+#endif
 
 	struct KeyEvent {
 
@@ -107,7 +109,6 @@ class OS_Windows : public OS {
 	VisualServer *visual_server;
 	CameraWindows *camera_server;
 	int pressrc;
-	HDC hDC; // Private GDI Device Context
 	HINSTANCE hInstance; // Holds The Instance Of The Application
 	HWND hWnd;
 	Point2 last_pos;
@@ -175,7 +176,7 @@ class OS_Windows : public OS {
 	void _drag_event(float p_x, float p_y, int idx);
 	void _touch_event(bool p_pressed, float p_x, float p_y, int idx);
 
-	void _update_window_style(bool repaint = true);
+	void _update_window_style(bool p_repaint = true, bool p_maximized = false);
 
 	void _set_mouse_mode_impl(MouseMode p_mode);
 
@@ -208,6 +209,7 @@ protected:
 	bool minimized;
 	bool borderless;
 	bool console_visible;
+	bool was_maximized;
 
 public:
 	LRESULT WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
