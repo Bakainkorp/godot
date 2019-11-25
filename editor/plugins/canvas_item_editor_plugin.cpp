@@ -70,11 +70,15 @@ class SnapDialog : public ConfirmationDialog {
 	SpinBox *primary_grid_steps;
 	SpinBox *rotation_offset;
 	SpinBox *rotation_step;
+	SpinBox *scale_step;
 
 public:
 	SnapDialog() {
 		const int SPIN_BOX_GRID_RANGE = 16384;
 		const int SPIN_BOX_ROTATION_RANGE = 360;
+		const float SPIN_BOX_SCALE_MIN = 0.01f;
+		const float SPIN_BOX_SCALE_MAX = 100;
+
 		Label *label;
 		VBoxContainer *container;
 		GridContainer *child_container;
@@ -182,9 +186,27 @@ public:
 		rotation_step->set_suffix("deg");
 		rotation_step->set_h_size_flags(SIZE_EXPAND_FILL);
 		child_container->add_child(rotation_step);
+
+		container->add_child(memnew(HSeparator));
+
+		child_container = memnew(GridContainer);
+		child_container->set_columns(2);
+		container->add_child(child_container);
+		label = memnew(Label);
+		label->set_text(TTR("Scale Step:"));
+		child_container->add_child(label);
+		label->set_h_size_flags(SIZE_EXPAND_FILL);
+
+		scale_step = memnew(SpinBox);
+		scale_step->set_min(SPIN_BOX_SCALE_MIN);
+		scale_step->set_max(SPIN_BOX_SCALE_MAX);
+		scale_step->set_allow_greater(true);
+		scale_step->set_h_size_flags(SIZE_EXPAND_FILL);
+		scale_step->set_step(0.01f);
+		child_container->add_child(scale_step);
 	}
 
-	void set_fields(const Point2 p_grid_offset, const Point2 p_grid_step, const int p_primary_grid_steps, const float p_rotation_offset, const float p_rotation_step) {
+	void set_fields(const Point2 p_grid_offset, const Point2 p_grid_step, const int p_primary_grid_steps, const float p_rotation_offset, const float p_rotation_step, const float p_scale_step) {
 		grid_offset_x->set_value(p_grid_offset.x);
 		grid_offset_y->set_value(p_grid_offset.y);
 		grid_step_x->set_value(p_grid_step.x);
@@ -192,14 +214,16 @@ public:
 		primary_grid_steps->set_value(p_primary_grid_steps);
 		rotation_offset->set_value(p_rotation_offset * (180 / Math_PI));
 		rotation_step->set_value(p_rotation_step * (180 / Math_PI));
+		scale_step->set_value(p_scale_step);
 	}
 
-	void get_fields(Point2 &p_grid_offset, Point2 &p_grid_step, int &p_primary_grid_steps, float &p_rotation_offset, float &p_rotation_step) {
+	void get_fields(Point2 &p_grid_offset, Point2 &p_grid_step, int &p_primary_grid_steps, float &p_rotation_offset, float &p_rotation_step, float &p_scale_step) {
 		p_grid_offset = Point2(grid_offset_x->get_value(), grid_offset_y->get_value());
 		p_grid_step = Point2(grid_step_x->get_value(), grid_step_y->get_value());
 		p_primary_grid_steps = int(primary_grid_steps->get_value());
 		p_rotation_offset = rotation_offset->get_value() / (180 / Math_PI);
 		p_rotation_step = rotation_step->get_value() / (180 / Math_PI);
+		p_scale_step = scale_step->get_value();
 	}
 };
 
@@ -770,6 +794,7 @@ bool CanvasItemEditor::_select_click_on_item(CanvasItem *item, Point2 p_click_po
 			editor_selection->add_node(item);
 			// Reselect
 			if (Engine::get_singleton()->is_editor_hint()) {
+				selected_from_canvas = true;
 				editor->call("edit_node", item);
 			}
 		}
@@ -921,7 +946,7 @@ void CanvasItemEditor::_commit_canvas_item_state(List<CanvasItem *> p_canvas_ite
 }
 
 void CanvasItemEditor::_snap_changed() {
-	((SnapDialog *)snap_dialog)->get_fields(grid_offset, grid_step, primary_grid_steps, snap_rotation_offset, snap_rotation_step);
+	((SnapDialog *)snap_dialog)->get_fields(grid_offset, grid_step, primary_grid_steps, snap_rotation_offset, snap_rotation_step, snap_scale_step);
 	grid_step_multiplier = 0;
 	viewport->update();
 }
@@ -1203,8 +1228,8 @@ bool CanvasItemEditor::_gui_input_zoom_or_pan(const Ref<InputEvent> &p_event, bo
 		}
 
 		if (panning) {
-			if (!b->is_pressed()) {
-				// Stop panning the viewport (for any mouse button press)
+			if (!b->is_pressed() && (pan_on_scroll || (b->get_button_index() != BUTTON_WHEEL_DOWN && b->get_button_index() != BUTTON_WHEEL_UP))) {
+				// Stop panning the viewport (for any mouse button press except zooming)
 				panning = false;
 			}
 		}
@@ -1291,6 +1316,7 @@ bool CanvasItemEditor::_gui_input_pivot(const Ref<InputEvent> &p_event) {
 
 			// Start dragging if we still have nodes
 			if (drag_selection.size() > 0) {
+				_save_canvas_item_state(drag_selection);
 				drag_from = transform.affine_inverse().xform((b.is_valid()) ? b->get_position() : viewport->get_local_mouse_position());
 				Vector2 new_pos;
 				if (drag_selection.size() == 1) {
@@ -1304,7 +1330,6 @@ bool CanvasItemEditor::_gui_input_pivot(const Ref<InputEvent> &p_event) {
 				}
 
 				drag_type = DRAG_PIVOT;
-				_save_canvas_item_state(drag_selection);
 			}
 			return true;
 		}
@@ -1852,6 +1877,7 @@ bool CanvasItemEditor::_gui_input_scale(const Ref<InputEvent> &p_event) {
 			Transform2D simple_xform = (viewport->get_transform() * unscaled_transform).affine_inverse() * transform;
 
 			bool uniform = m->get_shift();
+			bool is_ctrl = Input::get_singleton()->is_key_pressed(KEY_CONTROL);
 
 			Point2 drag_from_local = simple_xform.xform(drag_from);
 			Point2 drag_to_local = simple_xform.xform(drag_to);
@@ -1882,6 +1908,12 @@ bool CanvasItemEditor::_gui_input_scale(const Ref<InputEvent> &p_event) {
 					}
 				}
 			}
+
+			if (snap_scale && !is_ctrl) {
+				scale.x = roundf(scale.x / snap_scale_step) * snap_scale_step;
+				scale.y = roundf(scale.y / snap_scale_step) * snap_scale_step;
+			}
+
 			canvas_item->call("set_scale", scale);
 			return true;
 		}
@@ -3640,7 +3672,7 @@ void CanvasItemEditor::_notification(int p_what) {
 		int nb_having_pivot = 0;
 
 		// Update the viewport if the canvas_item changes
-		List<CanvasItem *> selection = _get_edited_canvas_items();
+		List<CanvasItem *> selection = _get_edited_canvas_items(true);
 		for (List<CanvasItem *>::Element *E = selection.front(); E; E = E->next()) {
 			CanvasItem *canvas_item = E->get();
 			CanvasItemEditorSelectedItem *se = editor_selection->get_node_editor_data<CanvasItemEditorSelectedItem>(canvas_item);
@@ -3780,6 +3812,7 @@ void CanvasItemEditor::_notification(int p_what) {
 		grid_snap_button->set_icon(get_icon("SnapGrid", "EditorIcons"));
 		snap_config_menu->set_icon(get_icon("GuiTabMenu", "EditorIcons"));
 		skeleton_menu->set_icon(get_icon("Bone", "EditorIcons"));
+		override_camera_button->set_icon(get_icon("Camera2D", "EditorIcons"));
 		pan_button->set_icon(get_icon("ToolPan", "EditorIcons"));
 		ruler_button->set_icon(get_icon("Ruler", "EditorIcons"));
 		pivot_button->set_icon(get_icon("EditPivot", "EditorIcons"));
@@ -3849,6 +3882,15 @@ void CanvasItemEditor::_notification(int p_what) {
 
 		anchor_mode_button->set_icon(get_icon("Anchor", "EditorIcons"));
 	}
+
+	if (p_what == NOTIFICATION_VISIBILITY_CHANGED) {
+		if (!is_visible() && override_camera_button->is_pressed()) {
+			ScriptEditorDebugger *debugger = ScriptEditor::get_singleton()->get_debugger();
+
+			debugger->set_camera_override(ScriptEditorDebugger::OVERRIDE_NONE);
+			override_camera_button->set_pressed(false);
+		}
+	}
 }
 
 void CanvasItemEditor::_selection_changed() {
@@ -3870,6 +3912,11 @@ void CanvasItemEditor::_selection_changed() {
 	}
 	anchors_mode = (nbValidControls == nbAnchorsMode);
 	anchor_mode_button->set_pressed(anchors_mode);
+
+	if (!selected_from_canvas) {
+		drag_type = DRAG_NONE;
+	}
+	selected_from_canvas = false;
 }
 
 void CanvasItemEditor::edit(CanvasItem *p_canvas_item) {
@@ -3930,9 +3977,9 @@ void CanvasItemEditor::_update_scrollbars() {
 	updating_scroll = true;
 
 	// Move the zoom buttons
-	Point2 zoom_hb_begin = Point2(5, 5);
-	zoom_hb_begin += (show_rulers) ? Point2(RULER_WIDTH, RULER_WIDTH) : Point2();
-	zoom_hb->set_begin(zoom_hb_begin);
+	Point2 controls_vb_begin = Point2(5, 5);
+	controls_vb_begin += (show_rulers) ? Point2(RULER_WIDTH, RULER_WIDTH) : Point2();
+	controls_vb->set_begin(controls_vb_begin);
 
 	// Move and resize the scrollbars
 	Size2 size = viewport->get_size();
@@ -4190,6 +4237,15 @@ void CanvasItemEditor::_button_toggle_grid_snap(bool p_status) {
 	grid_snap_active = p_status;
 	viewport->update();
 }
+void CanvasItemEditor::_button_override_camera(bool p_pressed) {
+	ScriptEditorDebugger *debugger = ScriptEditor::get_singleton()->get_debugger();
+
+	if (p_pressed) {
+		debugger->set_camera_override(ScriptEditorDebugger::OVERRIDE_2D);
+	} else {
+		debugger->set_camera_override(ScriptEditorDebugger::OVERRIDE_NONE);
+	}
+}
 
 void CanvasItemEditor::_button_tool_select(int p_index) {
 
@@ -4287,6 +4343,17 @@ void CanvasItemEditor::_button_toggle_anchor_mode(bool p_status) {
 	viewport->update();
 }
 
+void CanvasItemEditor::_update_override_camera_button(bool p_game_running) {
+	if (p_game_running) {
+		override_camera_button->set_disabled(false);
+		override_camera_button->set_tooltip(TTR("Game Camera Override\nOverrides game camera with editor viewport camera."));
+	} else {
+		override_camera_button->set_disabled(true);
+		override_camera_button->set_pressed(false);
+		override_camera_button->set_tooltip(TTR("Game Camera Override\nNo game instance running."));
+	}
+}
+
 void CanvasItemEditor::_popup_callback(int p_op) {
 
 	last_option = MenuOption(p_op);
@@ -4351,6 +4418,11 @@ void CanvasItemEditor::_popup_callback(int p_op) {
 			int idx = snap_config_menu->get_popup()->get_item_index(SNAP_USE_ROTATION);
 			snap_config_menu->get_popup()->set_item_checked(idx, snap_rotation);
 		} break;
+		case SNAP_USE_SCALE: {
+			snap_scale = !snap_scale;
+			int idx = snap_config_menu->get_popup()->get_item_index(SNAP_USE_SCALE);
+			snap_config_menu->get_popup()->set_item_checked(idx, snap_scale);
+		} break;
 		case SNAP_RELATIVE: {
 			snap_relative = !snap_relative;
 			int idx = snap_config_menu->get_popup()->get_item_index(SNAP_RELATIVE);
@@ -4363,7 +4435,7 @@ void CanvasItemEditor::_popup_callback(int p_op) {
 			snap_config_menu->get_popup()->set_item_checked(idx, snap_pixel);
 		} break;
 		case SNAP_CONFIGURE: {
-			((SnapDialog *)snap_dialog)->set_fields(grid_offset, grid_step, primary_grid_steps, snap_rotation_offset, snap_rotation_step);
+			((SnapDialog *)snap_dialog)->set_fields(grid_offset, grid_step, primary_grid_steps, snap_rotation_offset, snap_rotation_step, snap_scale_step);
 			snap_dialog->popup_centered(Size2(220, 160) * EDSCALE);
 		} break;
 		case SKELETON_SHOW_BONES: {
@@ -4879,6 +4951,8 @@ void CanvasItemEditor::_bind_methods() {
 	ClassDB::bind_method("_button_zoom_plus", &CanvasItemEditor::_button_zoom_plus);
 	ClassDB::bind_method("_button_toggle_smart_snap", &CanvasItemEditor::_button_toggle_smart_snap);
 	ClassDB::bind_method("_button_toggle_grid_snap", &CanvasItemEditor::_button_toggle_grid_snap);
+	ClassDB::bind_method(D_METHOD("_button_override_camera", "pressed"), &CanvasItemEditor::_button_override_camera);
+	ClassDB::bind_method(D_METHOD("_update_override_camera_button", "game_running"), &CanvasItemEditor::_update_override_camera_button);
 	ClassDB::bind_method("_button_toggle_anchor_mode", &CanvasItemEditor::_button_toggle_anchor_mode);
 	ClassDB::bind_method("_update_scroll", &CanvasItemEditor::_update_scroll);
 	ClassDB::bind_method("_update_scrollbars", &CanvasItemEditor::_update_scrollbars);
@@ -4914,6 +4988,7 @@ Dictionary CanvasItemEditor::get_state() const {
 	state["primary_grid_steps"] = primary_grid_steps;
 	state["snap_rotation_offset"] = snap_rotation_offset;
 	state["snap_rotation_step"] = snap_rotation_step;
+	state["snap_scale_step"] = snap_scale_step;
 	state["smart_snap_active"] = smart_snap_active;
 	state["grid_snap_active"] = grid_snap_active;
 	state["snap_node_parent"] = snap_node_parent;
@@ -4931,6 +5006,7 @@ Dictionary CanvasItemEditor::get_state() const {
 	state["show_zoom_control"] = zoom_hb->is_visible();
 	state["show_edit_locks"] = show_edit_locks;
 	state["snap_rotation"] = snap_rotation;
+	state["snap_scale"] = snap_scale;
 	state["snap_relative"] = snap_relative;
 	state["snap_pixel"] = snap_pixel;
 	state["skeleton_show_bones"] = skeleton_show_bones;
@@ -4970,6 +5046,10 @@ void CanvasItemEditor::set_state(const Dictionary &p_state) {
 
 	if (state.has("snap_rotation_offset")) {
 		snap_rotation_offset = state["snap_rotation_offset"];
+	}
+
+	if (state.has("snap_scale_step")) {
+		snap_scale_step = state["snap_scale_step"];
 	}
 
 	if (state.has("smart_snap_active")) {
@@ -5072,6 +5152,12 @@ void CanvasItemEditor::set_state(const Dictionary &p_state) {
 		snap_config_menu->get_popup()->set_item_checked(idx, snap_rotation);
 	}
 
+	if (state.has("snap_scale")) {
+		snap_scale = state["snap_scale"];
+		int idx = snap_config_menu->get_popup()->get_item_index(SNAP_USE_SCALE);
+		snap_config_menu->get_popup()->set_item_checked(idx, snap_scale);
+	}
+
 	if (state.has("snap_relative")) {
 		snap_relative = state["snap_relative"];
 		int idx = snap_config_menu->get_popup()->get_item_index(SNAP_RELATIVE);
@@ -5157,6 +5243,7 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	grid_step_multiplier = 0;
 	snap_rotation_offset = 0;
 	snap_rotation_step = 15 / (180 / Math_PI);
+	snap_scale_step = 0.1f;
 	smart_snap_active = false;
 	grid_snap_active = false;
 	snap_node_parent = true;
@@ -5166,11 +5253,13 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	snap_other_nodes = true;
 	snap_guides = true;
 	snap_rotation = false;
+	snap_scale = false;
 	snap_relative = false;
 	snap_pixel = false;
 	snap_target[0] = SNAP_TARGET_NONE;
 	snap_target[1] = SNAP_TARGET_NONE;
 
+	selected_from_canvas = false;
 	anchors_mode = false;
 
 	skeleton_show_bones = true;
@@ -5180,6 +5269,8 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	drag_to = Vector2();
 	dragged_guide_pos = Point2();
 	dragged_guide_index = -1;
+	is_hovering_h_guide = false;
+	is_hovering_v_guide = false;
 	panning = false;
 	pan_pressed = false;
 
@@ -5196,6 +5287,9 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	editor_selection->add_editor_plugin(this);
 	editor_selection->connect("selection_changed", this, "update");
 	editor_selection->connect("selection_changed", this, "_selection_changed");
+
+	editor->call_deferred("connect", "play_pressed", this, "_update_override_camera_button", make_binds(true));
+	editor->call_deferred("connect", "stop_pressed", this, "_update_override_camera_button", make_binds(false));
 
 	hb = memnew(HBoxContainer);
 	add_child(hb);
@@ -5222,6 +5316,14 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	scene_tree->set_stretch(true);
 	scene_tree->set_anchors_and_margins_preset(Control::PRESET_WIDE);
 	scene_tree->add_child(p_editor->get_scene_root());
+
+	controls_vb = memnew(VBoxContainer);
+	controls_vb->set_begin(Point2(5, 5));
+
+	zoom_hb = memnew(HBoxContainer);
+	// Bring the zoom percentage closer to the zoom buttons
+	zoom_hb->add_constant_override("separation", Math::round(-8 * EDSCALE));
+	controls_vb->add_child(zoom_hb);
 
 	viewport = memnew(CanvasItemEditorViewport(p_editor, this));
 	viewport_scrollable->add_child(viewport);
@@ -5266,11 +5368,7 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	v_scroll->connect("value_changed", this, "_update_scroll");
 	v_scroll->hide();
 
-	zoom_hb = memnew(HBoxContainer);
-	viewport->add_child(zoom_hb);
-	zoom_hb->set_begin(Point2(5, 5));
-	// Bring the zoom percentage closer to the zoom buttons
-	zoom_hb->add_constant_override("separation", Math::round(-8 * EDSCALE));
+	viewport->add_child(controls_vb);
 
 	zoom_minus = memnew(ToolButton);
 	zoom_hb->add_child(zoom_minus);
@@ -5379,6 +5477,7 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	p->connect("id_pressed", this, "_popup_callback");
 	p->set_hide_on_checkable_item_selection(false);
 	p->add_check_shortcut(ED_SHORTCUT("canvas_item_editor/use_rotation_snap", TTR("Use Rotation Snap")), SNAP_USE_ROTATION);
+	p->add_check_shortcut(ED_SHORTCUT("canvas_item_editor/use_scale_snap", TTR("Use Scale Snap")), SNAP_USE_SCALE);
 	p->add_check_shortcut(ED_SHORTCUT("canvas_item_editor/snap_relative", TTR("Snap Relative")), SNAP_RELATIVE);
 	p->add_check_shortcut(ED_SHORTCUT("canvas_item_editor/use_pixel_snap", TTR("Use Pixel Snap")), SNAP_USE_PIXEL);
 	p->add_submenu_item(TTR("Smart Snapping"), "SmartSnapping");
@@ -5438,6 +5537,15 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	p->add_shortcut(ED_SHORTCUT("canvas_item_editor/skeleton_make_bones", TTR("Make Custom Bone(s) from Node(s)"), KEY_MASK_CMD | KEY_MASK_SHIFT | KEY_B), SKELETON_MAKE_BONES);
 	p->add_shortcut(ED_SHORTCUT("canvas_item_editor/skeleton_clear_bones", TTR("Clear Custom Bones")), SKELETON_CLEAR_BONES);
 	p->connect("id_pressed", this, "_popup_callback");
+
+	hb->add_child(memnew(VSeparator));
+
+	override_camera_button = memnew(ToolButton);
+	hb->add_child(override_camera_button);
+	override_camera_button->connect("toggled", this, "_button_override_camera");
+	override_camera_button->set_toggle_mode(true);
+	override_camera_button->set_disabled(true);
+	_update_override_camera_button(false);
 
 	hb->add_child(memnew(VSeparator));
 
@@ -5524,7 +5632,7 @@ CanvasItemEditor::CanvasItemEditor(EditorNode *p_editor) {
 	key_auto_insert_button->set_toggle_mode(true);
 	key_auto_insert_button->set_focus_mode(FOCUS_NONE);
 	//key_auto_insert_button->connect("pressed", this, "_popup_callback", varray(ANIM_INSERT_KEY));
-	key_auto_insert_button->set_tooltip(TTR("Auto insert keys when objects are translated, rotated on scaled (based on mask).\nKeys are only added to existing tracks, no new tracks will be created.\nKeys must be inserted manually for the first time."));
+	key_auto_insert_button->set_tooltip(TTR("Auto insert keys when objects are translated, rotated or scaled (based on mask).\nKeys are only added to existing tracks, no new tracks will be created.\nKeys must be inserted manually for the first time."));
 	key_auto_insert_button->set_shortcut(ED_SHORTCUT("canvas_item_editor/anim_auto_insert_key", TTR("Auto Insert Key")));
 	animation_hb->add_child(key_auto_insert_button);
 
@@ -5647,8 +5755,6 @@ void CanvasItemEditorViewport::_on_change_type_closed() {
 }
 
 void CanvasItemEditorViewport::_create_preview(const Vector<String> &files) const {
-	label->set_position(get_global_position() + Point2(14, 14) * EDSCALE);
-	label_desc->set_position(label->get_position() + Point2(0, label->get_size().height));
 	bool add_preview = false;
 	for (int i = 0; i < files.size(); i++) {
 		String path = files[i];
@@ -6070,7 +6176,7 @@ CanvasItemEditorViewport::CanvasItemEditorViewport(EditorNode *p_node, CanvasIte
 	label->add_color_override("font_color_shadow", Color(0, 0, 0, 1));
 	label->add_constant_override("shadow_as_outline", 1 * EDSCALE);
 	label->hide();
-	editor->get_gui_base()->add_child(label);
+	canvas_item_editor->get_controls_container()->add_child(label);
 
 	label_desc = memnew(Label);
 	label_desc->set_text(TTR("Drag & drop + Shift : Add node as sibling\nDrag & drop + Alt : Change node type"));
@@ -6079,7 +6185,8 @@ CanvasItemEditorViewport::CanvasItemEditorViewport(EditorNode *p_node, CanvasIte
 	label_desc->add_constant_override("shadow_as_outline", 1 * EDSCALE);
 	label_desc->add_constant_override("line_spacing", 0);
 	label_desc->hide();
-	editor->get_gui_base()->add_child(label_desc);
+	canvas_item_editor->get_controls_container()->add_child(label_desc);
+
 	VS::get_singleton()->canvas_set_disable_scale(true);
 }
 

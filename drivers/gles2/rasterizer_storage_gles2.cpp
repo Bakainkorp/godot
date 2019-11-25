@@ -4583,13 +4583,24 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 	GLuint color_internal_format;
 	GLuint color_format;
 	GLuint color_type = GL_UNSIGNED_BYTE;
+	Image::Format image_format;
 
 	if (rt->flags[RasterizerStorage::RENDER_TARGET_TRANSPARENT]) {
+#ifdef GLES_OVER_GL
+		color_internal_format = GL_RGBA8;
+#else
 		color_internal_format = GL_RGBA;
+#endif
 		color_format = GL_RGBA;
+		image_format = Image::FORMAT_RGBA8;
 	} else {
+#ifdef GLES_OVER_GL
+		color_internal_format = GL_RGB8;
+#else
 		color_internal_format = GL_RGB;
+#endif
 		color_format = GL_RGB;
+		image_format = Image::FORMAT_RGB8;
 	}
 
 	rt->used_dof_blur_near = false;
@@ -4646,7 +4657,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 			glGenRenderbuffers(1, &rt->depth);
 			glBindRenderbuffer(GL_RENDERBUFFER, rt->depth);
 
-			glRenderbufferStorage(GL_RENDERBUFFER, config.depth_internalformat, rt->width, rt->height);
+			glRenderbufferStorage(GL_RENDERBUFFER, config.depth_buffer_internalformat, rt->width, rt->height);
 
 			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->depth);
 		}
@@ -4676,10 +4687,10 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 			return;
 		}
 
-		texture->format = Image::FORMAT_RGBA8;
-		texture->gl_format_cache = GL_RGBA;
+		texture->format = image_format;
+		texture->gl_format_cache = color_format;
 		texture->gl_type_cache = GL_UNSIGNED_BYTE;
-		texture->gl_internal_format_cache = GL_RGBA;
+		texture->gl_internal_format_cache = color_internal_format;
 		texture->tex_id = rt->color;
 		texture->width = rt->width;
 		texture->alloc_width = rt->width;
@@ -4694,7 +4705,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 	/* For MSAA */
 
 #ifndef JAVASCRIPT_ENABLED
-	if (rt->msaa != VS::VIEWPORT_MSAA_DISABLED && config.multisample_supported) {
+	if (rt->msaa >= VS::VIEWPORT_MSAA_2X && rt->msaa <= VS::VIEWPORT_MSAA_16X && config.multisample_supported) {
 
 		rt->multisample_active = true;
 
@@ -4714,7 +4725,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 
 		glGenRenderbuffers(1, &rt->multisample_depth);
 		glBindRenderbuffer(GL_RENDERBUFFER, rt->multisample_depth);
-		glRenderbufferStorageMultisample(GL_RENDERBUFFER, msaa, config.depth_internalformat, rt->width, rt->height);
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, msaa, config.depth_buffer_internalformat, rt->width, rt->height);
 
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->multisample_depth);
 
@@ -5090,6 +5101,11 @@ void RasterizerStorageGLES2::render_target_set_external_texture(RID p_render_tar
 			// free this
 			glDeleteFramebuffers(1, &rt->external.fbo);
 
+			// and this
+			if (rt->external.depth != 0) {
+				glDeleteRenderbuffers(1, &rt->external.depth);
+			}
+
 			// clean up our texture
 			Texture *t = texture_owner.get(rt->external.texture);
 			t->alloc_height = 0;
@@ -5102,6 +5118,7 @@ void RasterizerStorageGLES2::render_target_set_external_texture(RID p_render_tar
 
 			rt->external.fbo = 0;
 			rt->external.color = 0;
+			rt->external.depth = 0;
 		}
 	} else {
 		Texture *t;
@@ -5136,6 +5153,7 @@ void RasterizerStorageGLES2::render_target_set_external_texture(RID p_render_tar
 			t->render_target = rt;
 
 			rt->external.texture = texture_owner.make_rid(t);
+
 		} else {
 			// bind our frame buffer
 			glBindFramebuffer(GL_FRAMEBUFFER, rt->external.fbo);
@@ -5154,16 +5172,42 @@ void RasterizerStorageGLES2::render_target_set_external_texture(RID p_render_tar
 		t->alloc_height = rt->width;
 		t->alloc_width = rt->height;
 
-		// is there a point to setting the internal formats? we don't know them..
+		// Switch our texture on our frame buffer
+#if ANDROID_ENABLED
+		if (rt->msaa >= VS::VIEWPORT_MSAA_EXT_2X && rt->msaa <= VS::VIEWPORT_MSAA_EXT_4X) {
+			// This code only applies to the Oculus Go and Oculus Quest. Due to the the tiled nature
+			// of the GPU we can do a single render pass by rendering directly into our texture chains
+			// texture and apply MSAA as we render.
 
-		// set our texture as the destination for our framebuffer
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, p_texture_id, 0);
+			// On any other hardware these two modes are ignored and we do not have any MSAA,
+			// the normal MSAA modes need to be used to enable our two pass approach
 
-		// seeing we're rendering into this directly, better also use our depth buffer, just use our existing one :)
-		if (config.support_depth_texture) {
-			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt->depth, 0);
-		} else {
-			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->depth);
+			static const int msaa_value[] = { 2, 4 };
+			int msaa = msaa_value[rt->msaa - VS::VIEWPORT_MSAA_EXT_2X];
+
+			if (rt->external.depth == 0) {
+				// create a multisample depth buffer, we're not reusing Godots because Godot's didn't get created..
+				glGenRenderbuffers(1, &rt->external.depth);
+				glBindRenderbuffer(GL_RENDERBUFFER, rt->external.depth);
+				glRenderbufferStorageMultisample(GL_RENDERBUFFER, msaa, config.depth_buffer_internalformat, rt->width, rt->height);
+				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->external.depth);
+			}
+
+			// and set our external texture as the texture...
+			glFramebufferTexture2DMultisample(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, p_texture_id, 0, msaa);
+
+		} else
+#endif
+		{
+			// set our texture as the destination for our framebuffer
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, p_texture_id, 0);
+
+			// seeing we're rendering into this directly, better also use our depth buffer, just use our existing one :)
+			if (config.support_depth_texture) {
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, rt->depth, 0);
+			} else {
+				glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->depth);
+			}
 		}
 
 		// check status and unbind
@@ -5258,7 +5302,7 @@ RID RasterizerStorageGLES2::canvas_light_shadow_buffer_create(int p_width) {
 
 	glGenRenderbuffers(1, &cls->depth);
 	glBindRenderbuffer(GL_RENDERBUFFER, cls->depth);
-	glRenderbufferStorage(GL_RENDERBUFFER, config.depth_internalformat, cls->size, cls->height);
+	glRenderbufferStorage(GL_RENDERBUFFER, config.depth_buffer_internalformat, cls->size, cls->height);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, cls->depth);
 
 	glGenTextures(1, &cls->distance);
@@ -5739,6 +5783,8 @@ void RasterizerStorageGLES2::initialize() {
 
 	config.keep_original_textures = false;
 	config.shrink_textures_x2 = false;
+	config.depth_internalformat = GL_DEPTH_COMPONENT;
+	config.depth_type = GL_UNSIGNED_INT;
 
 #ifdef GLES_OVER_GL
 	config.float_texture_supported = true;
@@ -5746,9 +5792,7 @@ void RasterizerStorageGLES2::initialize() {
 	config.pvrtc_supported = false;
 	config.etc1_supported = false;
 	config.support_npot_repeat_mipmap = true;
-	config.depth_internalformat = GL_DEPTH_COMPONENT;
-	config.depth_type = GL_UNSIGNED_INT;
-
+	config.depth_buffer_internalformat = GL_DEPTH_COMPONENT24;
 #else
 	config.float_texture_supported = config.extensions.has("GL_ARB_texture_float") || config.extensions.has("GL_OES_texture_float");
 	config.s3tc_supported = config.extensions.has("GL_EXT_texture_compression_s3tc") || config.extensions.has("WEBGL_compressed_texture_s3tc");
@@ -5756,6 +5800,14 @@ void RasterizerStorageGLES2::initialize() {
 	config.pvrtc_supported = config.extensions.has("IMG_texture_compression_pvrtc") || config.extensions.has("WEBGL_compressed_texture_pvrtc");
 	config.support_npot_repeat_mipmap = config.extensions.has("GL_OES_texture_npot");
 
+	// on mobile check for 24 bit depth support for RenderBufferStorage
+	if (config.extensions.has("GL_OES_depth24")) {
+		config.depth_buffer_internalformat = _DEPTH_COMPONENT24_OES;
+		config.depth_type = GL_UNSIGNED_INT;
+	} else {
+		config.depth_buffer_internalformat = GL_DEPTH_COMPONENT16;
+		config.depth_type = GL_UNSIGNED_SHORT;
+	}
 #endif
 
 #ifndef GLES_OVER_GL
@@ -5832,7 +5884,7 @@ void RasterizerStorageGLES2::initialize() {
 		GLuint depth;
 		glGenTextures(1, &depth);
 		glBindTexture(GL_TEXTURE_2D, depth);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 32, 32, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+		glTexImage2D(GL_TEXTURE_2D, 0, config.depth_internalformat, 32, 32, 0, GL_DEPTH_COMPONENT, config.depth_type, NULL);
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -5848,14 +5900,15 @@ void RasterizerStorageGLES2::initialize() {
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glDeleteTextures(1, &depth);
 
-		if (status == GL_FRAMEBUFFER_COMPLETE) {
-			config.depth_internalformat = GL_DEPTH_COMPONENT;
-			config.depth_type = GL_UNSIGNED_INT;
-		} else {
+		if (status != GL_FRAMEBUFFER_COMPLETE) {
 			// If it fails, test to see if it supports a framebuffer texture using UNSIGNED_SHORT
 			// This is needed because many OSX devices don't support either UNSIGNED_INT or UNSIGNED_SHORT
-
+#ifdef GLES_OVER_GL
 			config.depth_internalformat = GL_DEPTH_COMPONENT16;
+#else
+			// OES_depth_texture extension only specifies GL_DEPTH_COMPONENT.
+			config.depth_internalformat = GL_DEPTH_COMPONENT;
+#endif
 			config.depth_type = GL_UNSIGNED_SHORT;
 
 			glGenFramebuffers(1, &fbo);
@@ -5863,7 +5916,7 @@ void RasterizerStorageGLES2::initialize() {
 
 			glGenTextures(1, &depth);
 			glBindTexture(GL_TEXTURE_2D, depth);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 32, 32, 0, GL_DEPTH_COMPONENT16, GL_UNSIGNED_SHORT, NULL);
+			glTexImage2D(GL_TEXTURE_2D, 0, config.depth_internalformat, 32, 32, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, NULL);
 
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -5883,15 +5936,6 @@ void RasterizerStorageGLES2::initialize() {
 			glDeleteFramebuffers(1, &fbo);
 			glBindTexture(GL_TEXTURE_2D, 0);
 			glDeleteTextures(1, &depth);
-		}
-	} else {
-		// Will use renderbuffer for depth, on mobile check for 24 bit depth support
-		if (config.extensions.has("GL_OES_depth24")) {
-			config.depth_internalformat = _DEPTH_COMPONENT24_OES;
-			config.depth_type = GL_UNSIGNED_INT;
-		} else {
-			config.depth_internalformat = GL_DEPTH_COMPONENT16;
-			config.depth_type = GL_UNSIGNED_SHORT;
 		}
 	}
 
